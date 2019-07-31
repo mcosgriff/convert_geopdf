@@ -23,13 +23,13 @@ def build_cmd_line_args():
     parser.add_argument('--verbose', help='Output extra logging at DEBUG level', action='store_true')
     parser.add_argument('--quiet', help='Limit the amount of debug information', action='store_true')
     parser.add_argument('--geopdf', help='GeoPDF file to convert', type=str, required=True)
-    parser.add_argument('--output-directory', type=str, help='Where to store the output file(s)', required=True)
+    parser.add_argument('--output-directory', type=str, help='Where to store the output file', required=True)
     parser.add_argument('--overwrite', help='If the destination file exists then overwrite it', action='store_true')
     parser.add_argument('--name', type=str, help='Name of converted file, if blank will use the geopdf name.')
     parser.add_argument('--output-format', choices=['GTiff', 'MBTiles', 'XYZ', 'TMS'], default='GTiff', type=str)
     parser.add_argument('--workspace', help='Where to put working files, will use temp diretory if blank', type=str)
     parser.add_argument('--temp-directory', help='Set the temp directory location', type=str)
-    parser.add_argument('--resize-tiff', help='Resizse the Tif to be evenly divisible by tile size',
+    parser.add_argument('--resize-tiff', help='Resizse the Tiff to be evenly divisible by tile size',
                         action='store_true')
 
     return parser.parse_args()
@@ -242,10 +242,11 @@ def file_size(file_path):
         return convert_bytes(file_info.st_size)
 
 
-def reproject_geotiff(geotiff: str, workspace: str, source_srs: str, target_srs: str):
+def reproject_geotiff(geotiff_ds: gdal.Dataset, workspace: str, source_srs: str, target_srs: str) -> [gdal.Dataset,
+                                                                                                      str]:
     log_message_with_border('Changing projection of GeoTIFF')
 
-    logger.debug('Changing {} from {} to {}'.format(geotiff, source_srs, target_srs))
+    logger.debug('Changing srs from {} to {}'.format(source_srs, target_srs))
 
     reprojected_geotiff_path = create_tempfile_path(workspace, 'reprojected_geotiff', 'tif')
 
@@ -258,10 +259,9 @@ def reproject_geotiff(geotiff: str, workspace: str, source_srs: str, target_srs:
                                     srcSRS=source_srs,
                                     dstSRS=target_srs)
 
-    dst_ds = gdal.Warp(geotiff, reprojected_geotiff_path, options=warp_options)
-    close_raster_dataset(dst_ds)
+    dst_ds = gdal.Warp(reprojected_geotiff_path, geotiff_ds, options=warp_options)
 
-    return reprojected_geotiff_path
+    return dst_ds, reprojected_geotiff_path
 
 
 def correct_geotiff_projection(geotiff: str, workspace: str, target_srs='EPSG:3857') -> str:
@@ -315,6 +315,9 @@ def process_geopdf(geopdf_path: str, gdal_pdf_layers: list, workspace: str, resi
     geotiff_ds, clipped_geotiff_path = crop_geotiff(geotiff_ds, neatline_geojson_path, workspace)
     logger.debug('Cropped GeoTIFF={}'.format(clipped_geotiff_path))
 
+    source_srs = find_srs(clipped_geotiff_path)
+    geotiff_ds, reprojected_geotiff_path = reproject_geotiff(geotiff_ds, workspace, source_srs, 'EPSG:3857')
+
     if resize_tiff:
         geotiff_ds, resized_geotiff_path = resize_tiff_to_fit_in_tile(geotiff_ds, workspace)
         logger.debug('Resized GeoTIFF={}'.format(resized_geotiff_path))
@@ -327,7 +330,7 @@ def process_geopdf(geopdf_path: str, gdal_pdf_layers: list, workspace: str, resi
     return compressed_geotiff_path
 
 
-def generate_tiles_from_geotiff(geotiff_path: str, workspace: str, min_zoom=1, max_zoom=17) -> str:
+def generate_tiles_from_geotiff(geotiff_path: str, workspace: str, min_zoom=1, max_zoom=17, verbose=False) -> str:
     log_message_with_border('Generating TMS directory from GeoTIFF')
 
     if not os.path.exists(geotiff_path) or not os.path.isfile(geotiff_path):
@@ -390,16 +393,18 @@ def get_extension_for_format(output_format):
         return 'zip'
 
 
-def generate_mbtiles_from_geotif(geotiff_path: str, workspace: str) -> str:
-    log_message_with_border('Generating MBTiles file from TMS directory')
+def generate_mbtiles_from_geotif(geotiff_path: str, workspace: str, verbose: bool) -> str:
+    log_message_with_border('Generating MBTiles file from GeoTIFF')
 
     if not os.path.exists(geotiff_path) or not os.path.isfile(geotiff_path):
         logger.error('{} does not exist'.format(geotiff_path))
         sys.exit(1)
 
-    tiles_directory = generate_tiles_from_geotiff(geotiff_path, workspace)
+    tiles_directory = generate_tiles_from_geotiff(geotiff_path, workspace, verbose=verbose)
 
     mbtiles_path = create_tempfile_path(workspace, 'processed', 'mbtiles')
+
+    log_message_with_border('Generating MBTiles file from TMS directory')
 
     mbutil.disk_to_mbtiles(tiles_directory, mbtiles_path, format='png', scheme='tms')
 
@@ -440,7 +445,7 @@ def do_work(args: argparse.Namespace):
             log_message_with_border('Completed')
 
             if args.output_format == 'MBTiles':
-                converted_mbtiles = generate_mbtiles_from_geotif(converted_geotiff, workspace)
+                converted_mbtiles = generate_mbtiles_from_geotif(converted_geotiff, workspace, args.verbose)
 
                 if os.path.exists(converted_mbtiles) and os.path.isfile(converted_mbtiles):
                     logger.info('Moving {} to {}'.format(converted_mbtiles, converted_path))

@@ -87,16 +87,16 @@ def find_neatline(geotiff_path: str) -> Union[geojson.Feature, None]:
     return None
 
 
-def add_srs_to_geojson(neatline_geojson: geojson.Feature, srs: str, workspace: str) -> str:
+def add_srs_to_geojson(neatline_geojson: geojson.Feature, srs: str, workspace: str) -> Union[str, None]:
     log_message_with_border('Adding srs information to GeoJSON neatline')
 
     if not neatline_geojson:
         logger.error('neatline_geojson is empty')
-        sys.exit(1)
+        return None
 
     if not srs:
         logger.error('srs is empty')
-        sys.exit(1)
+        return None
 
     unprojected_geojson_path = create_tempfile_path(workspace, 'unprojected_geojson', 'json')
     neatline_geojson_path = create_tempfile_path(workspace, 'neatline_geojson', 'json')
@@ -119,7 +119,7 @@ def find_srs(geotiff_path: str) -> Union[str, None]:
 
     if not os.path.exists(geotiff_path):
         logger.error('{} does not exist'.format(geotiff_path))
-        sys.exit(1)
+        return None
 
     srs_ds = gdal.Open(geotiff_path, GA_ReadOnly)
 
@@ -141,10 +141,15 @@ def find_srs(geotiff_path: str) -> Union[str, None]:
     return None
 
 
-def create_tempfile_path(workspace: str, filename: str, extension: str) -> str:
-    temp = os.path.join(workspace,
-                        '{}_{}.{}'.format(filename, ''.join([random.choice(string.ascii_letters) for n in range(25)]),
-                                          extension))
+def create_tempfile_path(workspace: str, filename: str, extension: str = None) -> str:
+    if extension:
+        temp = os.path.join(workspace,
+                            '{}_{}.{}'.format(filename,
+                                              ''.join([random.choice(string.ascii_letters) for n in range(25)]),
+                                              extension))
+    else:
+        temp = os.path.join(workspace,
+                            '{}_{}'.format(filename, ''.join([random.choice(string.ascii_letters) for n in range(25)])))
 
     return temp
 
@@ -187,7 +192,7 @@ def crop_geotiff(geotiff_ds: gdal.Dataset, neatline_geojson_path: str, workspace
 
     if not os.path.exists(neatline_geojson_path):
         logger.error('{} does not exist'.format(neatline_geojson_path))
-        sys.exit(1)
+        return None
 
     clipped_geotiff_path = create_tempfile_path(workspace, 'clipped_geotiff', 'tif')
 
@@ -343,11 +348,11 @@ def generate_tiles_from_geotiff(geotiff_path: str, workspace: str, min_zoom=1, m
                               zoom=[min_zoom, max_zoom],
                               profile='mercator',
                               s_srs=find_srs(geotiff_path),
-                              resampling='lanczos',
+                              resampling='antialias',
                               nb_processes=multiprocessing.cpu_count(),
                               tmscompatible=True,
                               resume=True,
-                              verbose=True)
+                              verbose=verbose)
 
     return tiles_directory
 
@@ -454,7 +459,7 @@ def do_work(args: argparse.Namespace):
                     logger.error('{} error occured with converting GeoTIFF to MBTiles'.format(converted_mbtiles))
             elif args.output_format == 'TMS':
                 tiles_directory = generate_tiles_from_geotiff(converted_geotiff, workspace)
-                zipped_tiles = create_tempfile_path(workspace, 'zipped_tiles', 'zip')
+                zipped_tiles = create_tempfile_path(workspace, 'zipped_tiles')
 
                 shutil.make_archive(zipped_tiles, 'zip', tiles_directory)
 

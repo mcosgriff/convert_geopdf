@@ -22,7 +22,7 @@ def build_cmd_line_args():
     parser = argparse.ArgumentParser(description='Merge a bunch of GeoPDFs and convert them')
     parser.add_argument('--verbose', help='Output extra logging at DEBUG level', action='store_true')
     parser.add_argument('--quiet', help='Limit the amount of debug information', action='store_true')
-    parser.add_argument('--geopdf', help='GeoPDF file to convert', type=str, required=True)
+    parser.add_argument('--geopdf', help='GeoPDF file to convert', type=str, required=False, action='append')
     parser.add_argument('--output-directory', type=str, help='Where to store the output file', required=True)
     parser.add_argument('--overwrite', help='If the destination file exists then overwrite it', action='store_true')
     parser.add_argument('--name', type=str, help='Name of converted file, if blank will use the geopdf name.')
@@ -31,6 +31,10 @@ def build_cmd_line_args():
     parser.add_argument('--temp-directory', help='Set the temp directory location', type=str)
     parser.add_argument('--resize-tiff', help='Resizse the Tiff to be evenly divisible by tile size',
                         action='store_true')
+    parser.add_argument('--file-prefix', help='If a known prefix is available, this will limit the files that build'
+                                              'the mosaic', type=str)
+    parser.add_argument('--geopdf-directory', help='Directory of GeoPDF files to convert', type=str, required=False,
+                        action='append')
 
     return parser.parse_args()
 
@@ -416,60 +420,79 @@ def generate_mbtiles_from_geotif(geotiff_path: str, workspace: str, verbose: boo
     return mbtiles_path
 
 
+def files_to_convert(geopdfs: list = None, geopdf_directories: list = None, file_prefix: str = None):
+    if geopdfs and len(geopdfs) > 0:
+        for geopdf in geopdfs:
+            if os.path.exists(geopdf) and os.path.isfile(geopdf):
+                yield geopdf
+
+    if geopdf_directories and len(geopdf_directories):
+        for geopdf_directory in geopdf_directories:
+            if os.path.exists(geopdf_directory) and os.path.isdir(geopdf_directory):
+                for root, dirs, files in os.walk(geopdf_directory):
+                    for name in files:
+                        filename, file_extension = os.path.splitext(name)
+
+                        if file_extension and len(file_extension) > 1 and file_extension == '.pdf':
+                            if file_prefix and name.startswith(file_prefix):
+                                yield os.path.join(root, name)
+                            else:
+                                yield os.path.join(root, name)
+
+
 def do_work(args: argparse.Namespace):
     if not os.path.exists(args.output_directory) or not os.path.isdir(args.output_directory):
         logger.error('{} does not exist, please create and re-run'.format(args.output_directory))
         sys.exit(1)
 
-    geopdf = args.geopdf
+    for geopdf in files_to_convert(args.geopdf, args.geopdf_directory, args.file_prefix):
+        if not os.path.exists(geopdf) or not os.path.isfile(geopdf):
+            logger.error('{} does not exist or is not a file'.format(geopdf))
+            sys.exit(1)
 
-    if not os.path.exists(geopdf) or not os.path.isfile(geopdf):
-        logger.error('{} does not exist or is not a file'.format(geopdf))
-        sys.exit(1)
+        if args.temp_directory:
+            os.environ["TMPDIR"] = args.temp_directory
 
-    if args.temp_directory:
-        os.environ["TMPDIR"] = args.temp_directory
+        if args.workspace and os.path.exists(args.workspace):
+            workspace = tempfile.mkdtemp(dir=args.workspace)
+        else:
+            workspace = tempfile.mkdtemp()
 
-    if args.workspace and os.path.exists(args.workspace):
-        workspace = tempfile.mkdtemp(dir=args.workspace)
-    else:
-        workspace = tempfile.mkdtemp()
+        extension = get_extension_for_format(args.output_format)
 
-    extension = get_extension_for_format(args.output_format)
+        if args.name:
+            converted_path = generate_final_file_path(args.name, args.output_directory, extension)
+        else:
+            name = os.path.splitext(os.path.basename(geopdf))[0]
+            converted_path = generate_final_file_path(name, args.output_directory, extension)
 
-    if args.name:
-        converted_path = generate_final_file_path(args.name, args.output_directory, extension)
-    else:
-        name = os.path.splitext(os.path.basename(geopdf))[0]
-        converted_path = generate_final_file_path(name, args.output_directory, extension)
+        if not os.path.exists(converted_path) or args.overwrite:
+            converted_geotiff = process_geopdf(geopdf, pdf_layers_to_include(), workspace, args.resize_tiff)
 
-    if not os.path.exists(converted_path) or args.overwrite:
-        converted_geotiff = process_geopdf(geopdf, pdf_layers_to_include(), workspace, args.resize_tiff)
+            if converted_geotiff and os.path.exists(converted_geotiff) and os.path.isfile(converted_geotiff):
+                log_message_with_border('Completed')
 
-        if converted_geotiff and os.path.exists(converted_geotiff) and os.path.isfile(converted_geotiff):
-            log_message_with_border('Completed')
+                if args.output_format == 'MBTiles':
+                    converted_mbtiles = generate_mbtiles_from_geotif(converted_geotiff, workspace, args.verbose)
 
-            if args.output_format == 'MBTiles':
-                converted_mbtiles = generate_mbtiles_from_geotif(converted_geotiff, workspace, args.verbose)
+                    if os.path.exists(converted_mbtiles) and os.path.isfile(converted_mbtiles):
+                        logger.info('Moving {} to {}'.format(converted_mbtiles, converted_path))
+                        shutil.move(converted_mbtiles, converted_path)
+                    else:
+                        logger.error('{} error occured with converting GeoTIFF to MBTiles'.format(converted_mbtiles))
+                elif args.output_format == 'TMS':
+                    tiles_directory = generate_tiles_from_geotiff(converted_geotiff, workspace)
+                    zipped_tiles = create_tempfile_path(workspace, 'zipped_tiles')
 
-                if os.path.exists(converted_mbtiles) and os.path.isfile(converted_mbtiles):
-                    logger.info('Moving {} to {}'.format(converted_mbtiles, converted_path))
-                    shutil.move(converted_mbtiles, converted_path)
-                else:
-                    logger.error('{} error occured with converting GeoTIFF to MBTiles'.format(converted_mbtiles))
-            elif args.output_format == 'TMS':
-                tiles_directory = generate_tiles_from_geotiff(converted_geotiff, workspace)
-                zipped_tiles = create_tempfile_path(workspace, 'zipped_tiles')
+                    zipped_tiles = shutil.make_archive(zipped_tiles, 'zip', tiles_directory)
 
-                shutil.make_archive(zipped_tiles, 'zip', tiles_directory)
-
-                logger.info('Moving {} to {}'.format(zipped_tiles, converted_path))
-                shutil.move(zipped_tiles, converted_path)
-            elif args.output_format == 'GTiff':
-                logger.info('Moving {} to {}'.format(converted_geotiff, converted_path))
-                shutil.move(converted_geotiff, converted_path)
-    else:
-        logger.info('{} already exists and not overritting.'.format(converted_path))
+                    logger.info('Moving {} to {}'.format(zipped_tiles, converted_path))
+                    shutil.move(zipped_tiles, converted_path)
+                elif args.output_format == 'GTiff':
+                    logger.info('Moving {} to {}'.format(converted_geotiff, converted_path))
+                    shutil.move(converted_geotiff, converted_path)
+        else:
+            logger.info('{} already exists and not overritting.'.format(converted_path))
 
     cleanup(workspace)
 

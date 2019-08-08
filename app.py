@@ -118,6 +118,18 @@ def add_srs_to_geojson(neatline_geojson: geojson.Feature, srs: str, workspace: s
     return neatline_geojson_path
 
 
+def find_dataset_files(src_ds: gdal.Dataset) -> Union[list, None]:
+    log_message_with_border('Finding the files which make up dataset')
+
+    if src_ds:
+        info = gdal.Info(src_ds, format='json')
+
+        if 'files' in info:
+            return info['files']
+
+    return None
+
+
 def find_srs(geotiff_path: str) -> Union[str, None]:
     log_message_with_border('Finding the SRS of GeoTIFF')
 
@@ -168,14 +180,14 @@ def log_message_with_border(message):
         {}""".format('-' * border_length, '| {} |'.format(message), '-' * border_length))
 
 
-def convert_to_geotiff(geopdf_path: str, gdal_pdf_layers: str, workspace: str, block_size=256,
+def convert_to_geotiff(geopdf_path: str, gdal_pdf_layers: str, workspace: str,
                        gdal_pdf_dpi=600) -> [gdal.Dataset, str]:
     log_message_with_border('Converting GeoPDF to GeoTIFF')
 
     gdal.SetConfigOption('GDAL_PDF_DPI', str(gdal_pdf_dpi))
     gdal.SetConfigOption('GDAL_PDF_LAYERS', gdal_pdf_layers)
 
-    create_options = ['NUM_THREADS=ALL_CPUS', 'BLOCKXSIZE={}'.format(block_size), 'BLOCKYSIZE={}'.format(block_size)]
+    create_options = ['NUM_THREADS=ALL_CPUS']
 
     options = gdal.TranslateOptions(
         format='GTiff',
@@ -232,7 +244,7 @@ def cleanup(workspace: str) -> None:
     shutil.rmtree(workspace)
 
 
-def convert_bytes(num):
+def convert_bytes(num: int) -> float:
     """
     this function will convert bytes to MiB.... GiB... etc
     """
@@ -242,7 +254,7 @@ def convert_bytes(num):
         num /= 1024.0
 
 
-def file_size(file_path):
+def file_size(file_path: str) -> float:
     """
     this function will return the file size
     """
@@ -254,6 +266,13 @@ def file_size(file_path):
 def reproject_geotiff(geotiff_ds: gdal.Dataset, workspace: str, source_srs: str, target_srs: str) -> [gdal.Dataset,
                                                                                                       str]:
     log_message_with_border('Changing projection of GeoTIFF')
+
+    if source_srs == target_srs:
+        files = find_dataset_files(geotiff_ds)
+
+        logger.info('{} is already {}'.format(os.path.splitext(os.path.basename(files[0]))[0], target_srs))
+
+        return geotiff_ds, files[0]
 
     logger.debug('Changing srs from {} to {}'.format(source_srs, target_srs))
 
@@ -293,13 +312,14 @@ def find_geotiffs_to_reproject(geotiffs: list, workspace: str, target_srs='EPSG:
 
 def compress_geotiff(
         geotiff_ds: gdal.Dataset, workspace: str,
-        geotiff_filename='compressed_geotiff.tif') -> [gdal.Dataset, str]:
+        geotiff_filename='compressed_geotiff.tif', block_size=256) -> [gdal.Dataset, str]:
     log_message_with_border('Running gdal_translate to compress the GeoTIFF')
 
     filename_and_extension = geotiff_filename.split('.')
     compressed_geotiff_path = create_tempfile_path(workspace, filename_and_extension[0], filename_and_extension[1])
 
-    creation_options = ['COMPRESS=DEFLATE', 'TILED=YES', 'NUM_THREADS=ALL_CPUS']
+    creation_options = ['COMPRESS=DEFLATE', 'TILED=YES', 'NUM_THREADS=ALL_CPUS', 'ZLEVEL=9',
+                        'BLOCKXSIZE={}'.format(block_size), 'BLOCKYSIZE={}'.format(block_size)]
 
     translate_options = gdal.TranslateOptions(format='GTiff', creationOptions=creation_options)
 
@@ -309,7 +329,10 @@ def compress_geotiff(
 
 
 def process_geopdf(geopdf_path: str, gdal_pdf_layers: list, workspace: str, resize_tiff: bool) -> str:
-    geotiff_ds, unclipped_geotiff_path = convert_to_geotiff(geopdf_path, ','.join(gdal_pdf_layers), workspace)
+    geotiff_ds, unclipped_geotiff_path = convert_to_geotiff(
+        geopdf_path=geopdf_path,
+        gdal_pdf_layers=','.join(gdal_pdf_layers),
+        workspace=workspace)
     logger.info('Unclipped GeoTIFF={}'.format(unclipped_geotiff_path))
 
     unprojected_geojson = find_neatline(unclipped_geotiff_path)
@@ -331,7 +354,7 @@ def process_geopdf(geopdf_path: str, gdal_pdf_layers: list, workspace: str, resi
         geotiff_ds, resized_geotiff_path = resize_tiff_to_fit_in_tile(geotiff_ds, workspace)
         logger.debug('Resized GeoTIFF={}'.format(resized_geotiff_path))
 
-    geotiff_ds, compressed_geotiff_path = compress_geotiff(geotiff_ds, workspace)
+    geotiff_ds, compressed_geotiff_path = compress_geotiff(geotiff_ds, workspace, block_size=128)
     logger.debug('Compressed GeoTIFF={}'.format(compressed_geotiff_path))
 
     close_raster_dataset(geotiff_ds)
@@ -391,7 +414,7 @@ def generate_final_file_path(name: str, output_directory: str, extension: str) -
     return os.path.join(output_directory, final_mbtiles_name)
 
 
-def get_extension_for_format(output_format):
+def get_extension_for_format(output_format: str) -> str:
     if output_format == 'GTiff':
         return 'tif'
     elif output_format == 'MBTiles':
@@ -440,7 +463,7 @@ def files_to_convert(geopdfs: list = None, geopdf_directories: list = None, file
                                 yield os.path.join(root, name)
 
 
-def do_work(args: argparse.Namespace):
+def do_work(args: argparse.Namespace) -> None:
     if not os.path.exists(args.output_directory) or not os.path.isdir(args.output_directory):
         logger.error('{} does not exist, please create and re-run'.format(args.output_directory))
         sys.exit(1)
@@ -491,10 +514,10 @@ def do_work(args: argparse.Namespace):
                 elif args.output_format == 'GTiff':
                     logger.info('Moving {} to {}'.format(converted_geotiff, converted_path))
                     shutil.move(converted_geotiff, converted_path)
-        else:
-            logger.info('{} already exists and not overritting.'.format(converted_path))
 
-    cleanup(workspace)
+            cleanup(workspace)
+        else:
+            logger.info('{} already exists and not overwritting.'.format(converted_path))
 
 
 if __name__ == '__main__':
@@ -507,7 +530,7 @@ if __name__ == '__main__':
         logging.basicConfig(level=logging.DEBUG, format="%(threadName)s::%(asctime)s::%(message)s")
     else:
         logging.basicConfig(level=logging.INFO, format="%(threadName)s::%(asctime)s::%(message)s")
-    logger = logging.getLogger('convert_geopdf_to_mbtiles')
+    logger = logging.getLogger('convert_geopdf')
 
     if _args.verbose and _args.quiet:
         logger.error('Only select verbose or quiet')
